@@ -8,6 +8,7 @@ use Illuminate\Support\Str;
 use Shopper\Payment\DataTransferObjects\PaymentResult;
 use Shopper\Payment\DataTransferObjects\WebhookResult;
 use Shopper\Payment\Drivers\Driver;
+use Shopper\Payment\Enum\PaymentMode;
 use Shopper\Stripe\Exceptions\StripeException;
 use Stripe\Exception\ApiErrorException;
 use Stripe\Exception\SignatureVerificationException;
@@ -43,6 +44,15 @@ final class StripeDriver extends Driver
     public function isConfigured(): bool
     {
         return filled($this->secretKey);
+    }
+
+    public function mode(): ?PaymentMode
+    {
+        return match (true) {
+            str_starts_with($this->secretKey, 'sk_test_') => PaymentMode::Test,
+            str_starts_with($this->secretKey, 'sk_live_') => PaymentMode::Live,
+            default => null,
+        };
     }
 
     public function publishableKey(): string
@@ -226,41 +236,40 @@ final class StripeDriver extends Driver
             throw StripeException::invalidWebhookPayload($e->getMessage());
         }
 
-        /** @var \Stripe\StripeObject $object */
         $object = $event->data->object; // @phpstan-ignore property.notFound
 
         return match ($event->type) {
             'payment_intent.amount_capturable_updated' => new WebhookResult(
                 action: 'authorized',
                 reference: $object->id,
-                amount: $object->amount_capturable ?? $object->amount, // @phpstan-ignore property.notFound
+                amount: $object->amount_capturable ?? $object->amount,
                 data: ['stripe_event' => $event->type],
             ),
             'payment_intent.succeeded' => new WebhookResult(
                 action: 'captured',
                 reference: $object->id,
-                amount: $object->amount_received ?? $object->amount, // @phpstan-ignore property.notFound
+                amount: $object->amount_received ?? $object->amount,
                 data: ['stripe_event' => $event->type],
             ),
             'payment_intent.payment_failed' => new WebhookResult(
                 action: 'failed',
                 reference: $object->id,
-                amount: $object->amount, // @phpstan-ignore property.notFound
+                amount: $object->amount,
                 data: [
                     'stripe_event' => $event->type,
-                    'failure_message' => $object->last_payment_error?->message, // @phpstan-ignore property.notFound
+                    'failure_message' => $object->last_payment_error?->message,
                 ],
             ),
             'payment_intent.canceled' => new WebhookResult(
                 action: 'canceled',
                 reference: $object->id,
-                amount: $object->amount, // @phpstan-ignore property.notFound
+                amount: $object->amount,
                 data: ['stripe_event' => $event->type],
             ),
             'charge.refunded' => new WebhookResult(
                 action: 'refunded',
-                reference: $object->payment_intent, // @phpstan-ignore property.notFound
-                amount: $object->amount_refunded, // @phpstan-ignore property.notFound
+                reference: $object->payment_intent,
+                amount: $object->amount_refunded,
                 data: ['stripe_event' => $event->type],
             ),
             default => WebhookResult::ignored(),
