@@ -9,6 +9,7 @@ use Shopper\Payment\DataTransferObjects\PaymentResult;
 use Shopper\Payment\DataTransferObjects\WebhookResult;
 use Shopper\Payment\Drivers\Driver;
 use Shopper\Payment\Enum\PaymentMode;
+use Shopper\Payment\Enum\WebhookAction;
 use Shopper\Stripe\Exceptions\StripeException;
 use Stripe\Exception\ApiErrorException;
 use Stripe\Exception\SignatureVerificationException;
@@ -36,9 +37,11 @@ final class StripeDriver extends Driver
         return 'Stripe';
     }
 
-    public function logo(): string
+    public function logo(): ?string
     {
-        return shopper_panel_assets('/images/payments/stripe.svg');
+        return function_exists('shopper_panel_assets')
+            ? shopper_panel_assets('/images/payments/stripe.svg')
+            : null;
     }
 
     public function isConfigured(): bool
@@ -53,6 +56,11 @@ final class StripeDriver extends Driver
             str_starts_with($this->secretKey, 'sk_live_') => PaymentMode::Live,
             default => null,
         };
+    }
+
+    public function supportsRetrieval(): bool
+    {
+        return true;
     }
 
     public function publishableKey(): string
@@ -205,7 +213,7 @@ final class StripeDriver extends Driver
             $intent = $this->getClient()->paymentIntents->retrieve($reference);
 
             return new PaymentResult(
-                success: ! in_array($intent->status, ['canceled', 'requires_payment_method'], true),
+                success: $intent->status !== 'canceled',
                 status: $this->mapIntentStatus($intent->status),
                 reference: $intent->id,
                 clientSecret: $intent->client_secret,
@@ -244,21 +252,21 @@ final class StripeDriver extends Driver
 
         return match ($event->type) {
             'payment_intent.amount_capturable_updated' => new WebhookResult(
-                action: 'authorized',
+                action: WebhookAction::Authorized,
                 reference: $object->id,
                 amount: $object->amount_capturable ?? $object->amount,
                 data: ['stripe_event' => $event->type],
                 eventId: $event->id,
             ),
             'payment_intent.succeeded' => new WebhookResult(
-                action: 'captured',
+                action: WebhookAction::Captured,
                 reference: $object->id,
                 amount: $object->amount_received ?? $object->amount,
                 data: ['stripe_event' => $event->type],
                 eventId: $event->id,
             ),
             'payment_intent.payment_failed' => new WebhookResult(
-                action: 'failed',
+                action: WebhookAction::Failed,
                 reference: $object->id,
                 amount: $object->amount,
                 data: [
@@ -268,19 +276,21 @@ final class StripeDriver extends Driver
                 eventId: $event->id,
             ),
             'payment_intent.canceled' => new WebhookResult(
-                action: 'canceled',
+                action: WebhookAction::Canceled,
                 reference: $object->id,
                 amount: $object->amount,
                 data: ['stripe_event' => $event->type],
                 eventId: $event->id,
             ),
-            'charge.refunded' => new WebhookResult(
-                action: 'refunded',
-                reference: $object->payment_intent,
-                amount: $object->amount_refunded,
-                data: ['stripe_event' => $event->type],
-                eventId: $event->id,
-            ),
+            'refund.created', 'refund.updated' => $object->status === 'succeeded'
+                ? new WebhookResult(
+                    action: WebhookAction::Refunded,
+                    reference: $object->payment_intent,
+                    amount: $object->amount,
+                    data: ['stripe_event' => $event->type, 'refund_id' => $object->id],
+                    eventId: $event->id,
+                )
+                : WebhookResult::ignored(),
             default => WebhookResult::ignored(),
         };
     }
